@@ -1,0 +1,27 @@
+{
+  "name": "trading-bot-backend",
+  "version": "1.0.0",
+  "description": "Dual-mode trading bot with Warren Buffett and Day Trader strategies",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "nodemon src/server.js",
+    "init-db": "node src/config/database.js"
+  },
+  "keywords": ["trading", "bot", "trading212", "stocks"],
+  "author": "Your Name",
+  "license": "MIT",
+  "dependencies": {
+    "express": "^4.18.2",
+    "cors": "^2.8.5",
+    "dotenv": "^16.3.1",
+    "better-sqlite3": "^9.2.2",
+    "axios": "^1.6.2",
+    "technicalindicators": "^3.1.0",
+    "node-cron": "^3.0.3",
+    "ws": "^8.16.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.2"
+  }
+}
