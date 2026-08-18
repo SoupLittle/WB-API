@@ -20,3 +20,5 @@ Fetch All Instruments: You can query the global metadata endpoint (/api/v0/equit
 Filtering: You can build your own custom watchlist locally by filtering the master instrument list using the ticker symbols you care about.
 
 Watchlists: Custom watchlists must be created and managed directly inside the mobile or web user interface.
+
+NASD and SEC guidelines for day-trading? Pattern day trader, part-time day trader, full-time day trader and the minimum cash in the account at the end of the day 
