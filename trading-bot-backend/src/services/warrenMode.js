@@ -5,6 +5,7 @@
 
 const { db } = require('../config/database');
 const trading212 = require('./trading212Service');
+const notificationService = require('./notificationService');
 
 // ========================================
 // CONFIGURATION
@@ -327,21 +328,31 @@ async function executeBuy(ticker, shares, reason, dryRun = false) {
     
     console.log(`✅ Warren Mode: Successfully bought ${shares} shares of ${ticker} at ${price} NOK`);
     
-    return {
+    const result = {
       success: true,
       ticker,
       shares,
       price,
       total
     };
+
+    // sendTradeExecuted expects an 'action' field to build its message -
+    // executeBuy only ever buys, so we set it explicitly here
+    await notificationService.sendTradeExecuted({ ...result, action: 'BUY' });
+
+    return result;
     
   } catch (error) {
     console.error(`❌ Failed to execute buy for ${ticker}:`, error);
-    return {
+    const result = {
       success: false,
       error: error.message,
       ticker
     };
+
+    await notificationService.sendTradeExecuted({ ...result, action: 'BUY' });
+
+    return result;
   }
 }
 

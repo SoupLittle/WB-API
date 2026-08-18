@@ -37,12 +37,29 @@ async function sendNotification(title, message, options = {}) {
       click = null,          // URL to open when clicked
       actions = []           // Array of action buttons
     } = options;
-    
+
+    // ntfy's JSON publish API requires priority as a NUMBER (1-5).
+    // The word aliases ('low', 'urgent', etc.) only work in the plain-text
+    // X-Priority HEADER format, not in the JSON body - sending a string here
+    // fails server-side JSON decoding and comes back as a confusing
+    // "request body must be valid JSON" (error 40024), not a clear type error.
+    const PRIORITY_MAP = {
+      min: 1,
+      low: 2,
+      default: 3,
+      high: 4,
+      max: 5,
+      urgent: 5
+    };
+    const numericPriority = typeof priority === 'number'
+      ? priority
+      : (PRIORITY_MAP[priority] ?? 3);
+
     const payload = {
       topic: NTFY_TOPIC,
       title: title,
       message: message,
-      priority: priority,
+      priority: numericPriority,
       tags: tags
     };
     
@@ -64,8 +81,15 @@ async function sendNotification(title, message, options = {}) {
     return { success: true, response: response.data };
     
   } catch (error) {
+    // error.message from axios is just "Request failed with status code 400" -
+    // the USEFUL info (ntfy's specific reason) lives in error.response.data,
+    // which axios does NOT include in error.message automatically
+    const ntfyReason = error.response?.data;
     console.error('❌ Failed to send notification:', error.message);
-    return { success: false, error: error.message };
+    if (ntfyReason) {
+      console.error('   ntfy says:', JSON.stringify(ntfyReason));
+    }
+    return { success: false, error: error.message, ntfyReason };
   }
 }
 
@@ -185,7 +209,7 @@ async function sendDailySummary(summary) {
  * Test notification (for setup)
  */
 async function sendTestNotification() {
-  await sendNotification(
+  return await sendNotification(
     '🤖 Trading Bot Connected!',
     'Your trading bot is now connected and ready to send notifications.',
     {

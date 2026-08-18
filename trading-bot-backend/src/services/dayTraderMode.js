@@ -5,6 +5,8 @@
 
 const { db } = require('../config/database');
 const trading212 = require('./trading212Service');
+const notificationService = require('./notificationService');
+const positionService = require('./positionService');
 const { RSI, MACD, EMA, ATR } = require('technicalindicators');
 
 // ========================================
@@ -357,6 +359,18 @@ async function executeTrade(ticker, action, shares, price, reason) {
   if (total > threshold) {
     // Create approval request
     const approvalId = createApproval(ticker, action, shares, price, reason);
+
+    // sendTradeApproval builds the Approve/Reject buttons using these
+    // exact fields - it expects an 'id', not 'approvalId'
+    await notificationService.sendTradeApproval({
+      id: approvalId,
+      ticker,
+      action,
+      shares,
+      total,
+      reason
+    });
+
     return {
       success: true,
       needsApproval: true,
@@ -382,10 +396,12 @@ async function executeTrade(ticker, action, shares, price, reason) {
     
     tradeStmt.run(ticker, action, shares, price, total, reason);
     
-    // Update positions
-    // TODO: Implement position tracking
+    // Keep the positions table in sync with what actually happened -
+    // this is what lets scanMarkets() correctly check exit conditions
+    // and enforce MAX_POSITIONS on the next scan
+    await positionService.recordTrade(ticker, 'daytrader', action, shares, price);
     
-    return {
+    const result = {
       success: true,
       needsApproval: false,
       executed: true,
@@ -395,13 +411,23 @@ async function executeTrade(ticker, action, shares, price, reason) {
       price,
       total
     };
+
+    await notificationService.sendTradeExecuted(result);
+
+    return result;
     
   } catch (error) {
     console.error(`❌ Failed to execute ${action}:`, error);
-    return {
+    const result = {
       success: false,
-      error: error.message
+      error: error.message,
+      ticker,
+      action
     };
+
+    await notificationService.sendTradeExecuted(result);
+
+    return result;
   }
 }
 

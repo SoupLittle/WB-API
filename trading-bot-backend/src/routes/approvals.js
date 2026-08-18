@@ -6,6 +6,15 @@
 const express = require('express');
 const router = express.Router();
 const { db } = require('../config/database');
+const trading212 = require('../services/trading212Service');
+const positionService = require('../services/positionService');
+const notificationService = require('../services/notificationService');
+
+// Trading212 needs the full instrument ticker (e.g. AAPL_US_EQ), not just
+// the short symbol stored in our database
+function getFullTicker(ticker) {
+  return `${ticker.toUpperCase()}_US_EQ`;
+}
 
 // ========================================
 // GET /api/approvals/pending
@@ -44,8 +53,11 @@ router.post('/:id/approve', async (req, res) => {
     
     console.log(`✅ Trade approved: ${approval.action} ${approval.shares} shares of ${approval.ticker}`);
     
-    // TODO: Execute the actual trade via Trading212 API
-    // For now, we'll just record it in the trades table
+    // Actually place the order with Trading212 - previously this just
+    // logged a success message and wrote a fake trades row without
+    // ever touching the broker
+    const fullTicker = getFullTicker(approval.ticker);
+    await trading212.placeMarketOrder(fullTicker, approval.shares, approval.action);
     
     // Insert into trades table
     const tradeStmt = db.prepare(`
@@ -61,6 +73,24 @@ router.post('/:id/approve', async (req, res) => {
       approval.total,
       approval.reason
     );
+
+    // Keep the positions table in sync, same as the auto-executed path
+    await positionService.recordTrade(
+      approval.ticker,
+      'daytrader',
+      approval.action,
+      approval.shares,
+      approval.price
+    );
+
+    await notificationService.sendTradeExecuted({
+      success: true,
+      ticker: approval.ticker,
+      action: approval.action,
+      shares: approval.shares,
+      price: approval.price,
+      total: approval.total
+    });
     
     // Remove from pending_approvals
     const deleteStmt = db.prepare('DELETE FROM pending_approvals WHERE id = ?');
@@ -78,6 +108,9 @@ router.post('/:id/approve', async (req, res) => {
     });
   } catch (error) {
     console.error('Error approving trade:', error);
+    // Note: if placeMarketOrder failed, the approval is deliberately left
+    // in pending_approvals rather than deleted - so a failed order doesn't
+    // silently vanish, and you can retry or reject it explicitly
     res.status(500).json({ error: 'Failed to approve trade' });
   }
 });

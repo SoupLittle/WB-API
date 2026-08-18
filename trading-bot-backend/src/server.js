@@ -35,6 +35,12 @@ const approvalsRoutes = require('./routes/approvals');
 const warrenRoutes = require('./routes/warren');
 const dayTraderRoutes = require('./routes/daytrader');
 
+// Also import the services directly (not just their routes) so the
+// cron jobs below can call scanWatchlist() / scanMarkets() on a schedule
+const warrenMode = require('./services/warrenMode');
+const dayTraderMode = require('./services/dayTraderMode');
+const positionService = require('./services/positionService');
+
 // ========================================
 // REGISTER ROUTES
 // All API endpoints will be under /api/...
@@ -94,25 +100,36 @@ app.get('/api/status', (req, res) => {
 
 // WARREN MODE: Daily scan at 9:00 AM
 // Checks watchlist for undervalued stocks
-cron.schedule('0 9 * * *', () => {
+cron.schedule('0 9 * * *', async () => {
   console.log('⏰ [CRON] Running Warren Mode daily scan...');
-  // TODO: Implement warrenMode.scanWatchlist()
-  // This will be added when we create warrenMode.js
+  try {
+    await warrenMode.scanWatchlist();
+  } catch (error) {
+    // node-cron doesn't catch errors from async callbacks for us -
+    // without this try/catch, a failed scan would fail silently
+    console.error('❌ [CRON] Warren Mode scan failed:', error);
+  }
 });
 
 // DAY TRADER MODE: Scan every 15 minutes during market hours
 // Monday-Friday, 9 AM - 4 PM
-cron.schedule('*/15 9-16 * * 1-5', () => {
+cron.schedule('*/15 9-16 * * 1-5', async () => {
   console.log('⏰ [CRON] Running Day Trader market scan...');
-  // TODO: Implement dayTraderMode.scanMarkets()
-  // This will be added when we create dayTraderMode.js
+  try {
+    await dayTraderMode.scanMarkets();
+  } catch (error) {
+    console.error('❌ [CRON] Day Trader scan failed:', error);
+  }
 });
 
 // POSITION UPDATER: Update all position values every 5 minutes
-cron.schedule('*/5 * * * *', () => {
+cron.schedule('*/5 * * * *', async () => {
   console.log('⏰ [CRON] Updating position values...');
-  // TODO: Implement updateAllPositions()
-  // This will fetch current prices and update profit/loss
+  try {
+    await positionService.updateAllPositions();
+  } catch (error) {
+    console.error('❌ [CRON] Position update failed:', error);
+  }
 });
 
 // ========================================
