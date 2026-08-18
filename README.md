@@ -1,6 +1,14 @@
 # TODO
 
+Add watchlists / stocks for it to run through
 
+Remove dead files
+
+Test run it continuously for minimum 12 hours
+
+Deploy on a raspberry pi (to run continuously on PAPER/DEMO mode), and run for a minimum of 2 month
+
+IF everything is good after, change to live mode
 
 
 
