@@ -2,7 +2,7 @@
 
 Add watchlists / stocks for it to run through
 
-Remove dead files
+Remove dead files and fix all README files
 
 Test run it continuously for minimum 12 hours
 
