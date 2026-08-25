@@ -313,7 +313,34 @@ async function executeBuy(ticker, shares, reason, dryRun = false) {
     const order = await trading212.placeMarketOrder(fullTicker, shares, 'BUY');
     
     // Record trade in database (use short ticker for consistency)
-    const price = order.fillPrice || order.limitPrice || 0;
+    // Market orders aren't always filled instantly - Trading212 can return
+    // status: 'NEW' with no fillPrice yet. In that case, fall back to the
+    // price we evaluated the stock against (the watchlist's current_price),
+    // which is the best estimate available until the position-refresher
+    // cron corrects it once the order actually fills.
+    let price = order.fillPrice || order.limitPrice;
+
+    if (!price) {
+      const watchlistRow = db.prepare(
+        'SELECT current_price FROM watchlist WHERE ticker = ?'
+      ).get(ticker);
+      price = watchlistRow?.current_price || 0;
+
+      if (price > 0) {
+        console.log(`   ⏳ Order not yet filled - using evaluated price as estimate: ${price}`);
+      }
+    }
+
+    if (!price || price <= 0) {
+      // Genuinely no price available anywhere - don't silently insert
+      // a 0, and don't let a raw SQLite constraint error be the only
+      // signal of what went wrong
+      throw new Error(
+        `Order placed (id: ${order.id}) but no price available yet to record the trade. ` +
+        `Check Trading212 for the order status.`
+      );
+    }
+
     const total = shares * price;
     
     const stmt = db.prepare(`

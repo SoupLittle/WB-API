@@ -302,6 +302,23 @@ async function getHistoricalPrices(ticker, period = '1m') {
 // ========================================
 
 /**
+ * Get the FULL list of tradeable instruments, unfiltered.
+ * searchInstruments() always caps its return at 10 results, which is
+ * fine for a human typing a search query, but useless when you need
+ * to check several exact tickers locally without repeated API calls
+ * (repeated calls to the same heavy endpoint is what was causing 429s).
+ * @returns {Promise<Array>} Every instrument Trading212 offers
+ */
+async function getAllInstruments() {
+  try {
+    const response = await api.get('/equity/metadata/instruments');
+    return response.data;
+  } catch (error) {
+    handleApiError(error, 'getAllInstruments');
+  }
+}
+
+/**
  * Search for stocks/instruments
  * @param {string} query - Search query (ticker or company name)
  * @returns {Promise<Array>} Array of matching instruments
@@ -372,6 +389,7 @@ module.exports = {
   
   // Search
   searchInstruments,
+  getAllInstruments,
   
   // Utility
   testConnection,

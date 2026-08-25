@@ -8,6 +8,8 @@ Test run it continuously for minimum 12 hours
 
 Deploy on a raspberry pi (to run continuously on PAPER/DEMO mode), and run for a minimum of 2 month
 
+Change API to one from live account + change allowed IP (public IP address)
+
 IF everything is good after, change to live mode
 
 
