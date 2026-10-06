@@ -10,6 +10,7 @@ const TradingDashboard = () => {
   const [warrenPositions, setWarrenPositions] = useState([]);
   const [dayTraderPositions, setDayTraderPositions] = useState([]);
   const [pendingApprovals, setPendingApprovals] = useState([]);
+  const [pendingOrders, setPendingOrders] = useState([]);
   const [showSettings, setShowSettings] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -42,10 +43,11 @@ const TradingDashboard = () => {
         fetch(`${API_URL}/positions/warren`),
         fetch(`${API_URL}/positions/daytrader`),
         fetch(`${API_URL}/approvals/pending`),
-        fetch(`${API_URL}/settings/status`)
+        fetch(`${API_URL}/settings/status`),
+        fetch(`${API_URL}/positions/pending`)
       ]);
       
-      const [statusData, settingsData, watchlistData, warrenPosData, dayTraderPosData, approvalsData, pauseData] = await Promise.all(
+      const [statusData, settingsData, watchlistData, warrenPosData, dayTraderPosData, approvalsData, pauseData, pendingOrdersData] = await Promise.all(
         responses.map(r => r.json())
       );
       
@@ -57,6 +59,7 @@ const TradingDashboard = () => {
       setPendingApprovals(approvalsData);
       setTempWarrenAllocation(settingsData.warren_allocation);
       setPauseStatus(pauseData);
+      setPendingOrders(Array.isArray(pendingOrdersData) ? pendingOrdersData : []);
       setLoading(false);
     } catch (err) {
       console.error('Error:', err);
@@ -321,6 +324,27 @@ const TradingDashboard = () => {
                 ))
               )}
             </div>
+
+            {pendingOrders.length > 0 && (
+              <>
+                <h3 className="font-bold mb-3">⏳ Pending Orders:</h3>
+                <div className="space-y-3 mb-6">
+                  {pendingOrders.map(order => (
+                    <div key={order.id} className="bg-yellow-900/20 border border-yellow-600/30 rounded-xl p-4">
+                      <div className="flex justify-between">
+                        <div>
+                          <p className="font-bold">{order.ticker}</p>
+                          <p className="text-sm text-yellow-200">{order.side} {order.quantity} shares</p>
+                        </div>
+                        <div className="text-right text-sm text-yellow-300">
+                          Placed, not filled yet
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </>
+            )}
 
             <h3 className="font-bold mb-3">💼 Holdings:</h3>
             <div className="space-y-3">

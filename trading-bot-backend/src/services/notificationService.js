@@ -148,12 +148,12 @@ async function sendTradeExecuted(trade) {
     : `❌ Trade Failed`;
     
   const message = trade.success
-    ? `${trade.action} ${trade.shares} shares of ${trade.ticker}\nPrice: ${trade.price} NOK\nTotal: ${trade.total} NOK`
+    ? `${trade.action} ${trade.shares} shares of ${trade.ticker}\nPrice: ${trade.price.toFixed(2)} NOK\nTotal: ${trade.total.toFixed(2)} NOK`
     : `Failed to ${trade.action} ${trade.ticker}: ${trade.error}`;
   
   await sendNotification(title, message, {
     priority: trade.success ? 'default' : 'high',
-    tags: trade.success ? ['heavy_check_mark', 'moneybag'] : ['x', 'warning'],
+    tags: trade.success ? ['moneybag'] : ['x', 'warning'],
     click: SERVER_URL
   });
 }

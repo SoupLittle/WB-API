@@ -90,39 +90,92 @@ async function recordTrade(ticker, mode, action, shares, price) {
  * by the cron job in server.js, and also feeds Day Trader's exit-condition
  * checks (which read position.current_price).
  */
+/**
+ * Reconcile local positions against what Trading212 ACTUALLY shows.
+ *
+ * This used to just fetch a fresh price for whatever was already in the
+ * local `positions` table - it never checked whether that position still
+ * genuinely existed on Trading212. That let "phantom" positions survive
+ * locally after an order was cancelled (or never filled) on the broker's
+ * side, since cancelling on Trading212 doesn't notify our database.
+ *
+ * Trading212's live portfolio is treated as the source of truth:
+ *   - If it shows zero/no holding for a ticker we have locally, the local
+ *     position is phantom (cancelled/never filled) - delete it.
+ *   - If it shows a holding, sync our shares/avg_price/current_price to
+ *     match exactly, in case of partial fills or manual intervention.
+ *
+ * One getPortfolio() call covers every local position, instead of one
+ * API call per position - this avoids the rate-limiting we hit earlier
+ * when we were calling a heavy endpoint once per ticker.
+ */
 async function updateAllPositions() {
   const positions = db.prepare(`SELECT * FROM positions`).all();
 
   if (positions.length === 0) {
-    console.log('   No open positions to update.');
-    return { updated: 0, failed: 0 };
+    console.log('   No open positions to reconcile.');
+    return { unchanged: 0, corrected: 0, removed: 0, failed: 0 };
   }
 
-  let updated = 0;
+  let unchanged = 0;
+  let corrected = 0;
+  let removed = 0;
   let failed = 0;
+
+  let portfolio;
+  try {
+    portfolio = await trading212.getPortfolio();
+  } catch (error) {
+    console.error('   Failed to fetch Trading212 portfolio - skipping reconciliation this cycle:', error.message);
+    return { unchanged: 0, corrected: 0, removed: 0, failed: positions.length };
+  }
 
   for (const position of positions) {
     try {
-      const currentPrice = await trading212.getCurrentPrice(position.ticker);
-      const currentValue = position.shares * currentPrice;
-      const profitLoss = currentValue - position.invested;
+      const upperTicker = position.ticker.toUpperCase();
+      const match = portfolio.find(p =>
+        p.ticker === upperTicker || p.ticker === `${upperTicker}_US_EQ`
+      );
+
+      if (!match || !match.quantity || match.quantity <= 0) {
+        // Trading212 has nothing for this ticker - the order behind this
+        // local position never actually filled, or was cancelled/sold
+        // outside the bot. Remove it so Holdings reflects reality.
+        db.prepare('DELETE FROM positions WHERE id = ?').run(position.id);
+        console.log(`   🗑️  Removed ${position.ticker} - not found in real Trading212 portfolio (likely cancelled/never filled)`);
+        removed++;
+        continue;
+      }
+
+      const shares = match.quantity;
+      const avgPrice = match.averagePrice || position.avg_price;
+      const currentPrice = match.currentPrice || position.current_price || avgPrice;
+      const invested = shares * avgPrice;
+      const currentValue = shares * currentPrice;
+      const profitLoss = currentValue - invested;
+
+      const changed = shares !== position.shares || avgPrice !== position.avg_price;
 
       db.prepare(`
         UPDATE positions
-        SET current_price = ?, current_value = ?, profit_loss = ?, updated_at = CURRENT_TIMESTAMP
+        SET shares = ?, avg_price = ?, current_price = ?, invested = ?, current_value = ?, profit_loss = ?, updated_at = CURRENT_TIMESTAMP
         WHERE id = ?
-      `).run(currentPrice, currentValue, profitLoss, position.id);
+      `).run(shares, avgPrice, currentPrice, invested, currentValue, profitLoss, position.id);
 
-      updated++;
+      if (changed) {
+        console.log(`   🔄 Corrected ${position.ticker}: local had ${position.shares} shares @ ${position.avg_price}, Trading212 shows ${shares} @ ${avgPrice}`);
+        corrected++;
+      } else {
+        unchanged++;
+      }
     } catch (error) {
-      // One bad ticker shouldn't stop the rest of the portfolio from updating
-      console.error(`   Failed to update ${position.ticker}:`, error.message);
+      console.error(`   Failed to reconcile ${position.ticker}:`, error.message);
       failed++;
     }
   }
 
-  console.log(`   Updated ${updated} position(s)${failed > 0 ? `, ${failed} failed` : ''}.`);
-  return { updated, failed };
+  console.log(`   Reconciled: ${unchanged} unchanged, ${corrected} corrected, ${removed} removed${failed > 0 ? `, ${failed} failed` : ''}.`);
+  return { unchanged, corrected, removed, failed };
 }
 
 module.exports = {

@@ -6,6 +6,7 @@
 const { db } = require('../config/database');
 const trading212 = require('./trading212Service');
 const notificationService = require('./notificationService');
+const marketDataService = require('./marketDataService');
 
 // ========================================
 // CONFIGURATION
@@ -14,7 +15,7 @@ const notificationService = require('./notificationService');
 const CONFIG = {
   // Buy signals - STRICTER CRITERIA
   MIN_DISCOUNT_PERCENT: 20,        // Only buy if stock is at least 20% undervalued (bigger safety margin!)
-  MAX_SINGLE_PURCHASE: 5000,       // Maximum NOK per purchase (build positions slowly)
+  MAX_SINGLE_PURCHASE: 4750,       // Maximum NOK per purchase (build positions slowly)
   
   // Quality filters (Warren only buys quality companies)
   MIN_ROE: 20,                     // Return on Equity should be > 20% (higher standard!)
@@ -63,6 +64,59 @@ const TICKER_MAP = {
 function getFullTicker(ticker) {
   const upperTicker = ticker.toUpperCase();
   return TICKER_MAP[upperTicker] || `${upperTicker}_US_EQ`;
+}
+
+// ========================================
+// CURRENCY CONVERSION
+// Trading212 can only EXECUTE orders in the account's base currency
+// (confirmed: NOK for this account) - but stock prices from Twelve
+// Data come back in whatever currency that stock actually trades in
+// (USD for US stocks, EUR for XETRA, GBP for LSE, etc). Without
+// converting, budget math (which is all in NOK) silently compares
+// NOK against foreign-currency prices - this is what caused the
+// Ford position to be ~10x larger than its NOK safety cap allowed.
+//
+// Valuation (discount %, quality checks) stays in NATIVE currency,
+// since that's an apples-to-apples comparison against your own
+// intrinsic_value estimate (also entered in native currency).
+// Conversion only happens at the budget-sizing step, where NOK
+// amounts and share prices actually need to meet.
+// ========================================
+
+// Exchange -> currency. No exchange set (US stocks, via getFullTicker's
+// _US_EQ fallback) defaults to USD. Extend this as you add EU stocks.
+const EXCHANGE_CURRENCY_MAP = {
+  'XETRA': 'EUR',
+  'LSE': 'GBP',
+  'EURONEXT': 'EUR',
+  'MILAN': 'EUR',
+  'OSLO': 'NOK'
+};
+
+function getStockCurrency(stock) {
+  if (!stock.exchange) return 'USD';
+  const currency = EXCHANGE_CURRENCY_MAP[stock.exchange.toUpperCase()];
+  if (!currency) {
+    console.log(`   ⚠️ Unknown exchange "${stock.exchange}" - add it to EXCHANGE_CURRENCY_MAP in warrenMode.js. Assuming USD for now.`);
+    return 'USD';
+  }
+  return currency;
+}
+
+/**
+ * Convert an amount from a given currency into NOK.
+ * @param {number} amount
+ * @param {string} currency - e.g. 'USD', 'EUR'
+ * @returns {Promise<number>}
+ */
+async function convertToNOK(amount, currency) {
+  if (currency === 'NOK') return amount; // already in NOK, no conversion needed
+
+  const rate = await marketDataService.getExchangeRate(currency, 'NOK');
+  if (!rate) {
+    throw new Error(`Could not fetch ${currency}->NOK exchange rate - refusing to size a trade without it`);
+  }
+  return amount * rate;
 }
 
 // ========================================
@@ -235,6 +289,12 @@ async function evaluateBuyOpportunity(stock) {
     }
     
     // 5. Calculate purchase amount
+    // IMPORTANT: all budget figures (warrenBudget, availableBudget,
+    // MAX_SINGLE_PURCHASE) are in NOK - currentPrice is in the stock's
+    // NATIVE currency. They must not be compared or divided directly.
+    const stockCurrency = getStockCurrency(stock);
+    const priceNOK = await convertToNOK(currentPrice, stockCurrency);
+
     const availableBudget = await getAvailableBudget();
     const maxBuy = Math.min(
       CONFIG.MAX_SINGLE_PURCHASE,
@@ -242,7 +302,7 @@ async function evaluateBuyOpportunity(stock) {
       availableBudget
     );
     
-    if (maxBuy < currentPrice) {
+    if (maxBuy < priceNOK) {
       return {
         shouldBuy: false,
         reason: 'Insufficient budget for even 1 share',
@@ -250,8 +310,8 @@ async function evaluateBuyOpportunity(stock) {
       };
     }
     
-    const sharesToBuy = Math.floor(maxBuy / currentPrice);
-    const totalCost = sharesToBuy * currentPrice;
+    const sharesToBuy = Math.floor(maxBuy / priceNOK);
+    const totalCost = sharesToBuy * priceNOK; // in NOK
     
     // 6. Decision: BUY!
     return {
@@ -259,7 +319,8 @@ async function evaluateBuyOpportunity(stock) {
       reason: `Undervalued by ${discount.toFixed(1)}% (${quality.reasons.join(', ')})`,
       amount: totalCost,
       shares: sharesToBuy,
-      price: currentPrice
+      price: currentPrice,     // native currency - for reference/logging
+      priceNOK                 // NOK - what executeBuy should actually record
     };
     
   } catch (error) {
@@ -283,9 +344,12 @@ async function evaluateBuyOpportunity(stock) {
  * @param {number} shares - Number of shares to buy
  * @param {string} reason - Why we're buying
  * @param {boolean} dryRun - If true, don't actually place order (for testing)
+ * @param {number|null} estimatedPriceNOK - Price in NOK from evaluateBuyOpportunity,
+ *   used as the fallback price if Trading212's order hasn't filled yet. MUST be
+ *   in NOK already (converted) - trades/positions tables are NOK-denominated.
  * @returns {Promise<Object>} Trade result
  */
-async function executeBuy(ticker, shares, reason, dryRun = false) {
+async function executeBuy(ticker, shares, reason, dryRun = false, estimatedPriceNOK = null) {
   try {
     console.log(`\n🤔 Warren Mode: ${dryRun ? '[DRY RUN] Would buy' : 'Buying'} ${shares} shares of ${ticker}`);
     console.log(`   Reason: ${reason}`);
@@ -314,20 +378,20 @@ async function executeBuy(ticker, shares, reason, dryRun = false) {
     
     // Record trade in database (use short ticker for consistency)
     // Market orders aren't always filled instantly - Trading212 can return
-    // status: 'NEW' with no fillPrice yet. In that case, fall back to the
-    // price we evaluated the stock against (the watchlist's current_price),
-    // which is the best estimate available until the position-refresher
-    // cron corrects it once the order actually fills.
+    // status: 'NEW' with no fillPrice yet. order.fillPrice, when present,
+    // comes from Trading212 itself - which only ever executes in the
+    // account's base currency (NOK), so it needs no conversion. But if
+    // it's NOT present yet, we fall back to estimatedPriceNOK, which
+    // MUST already be NOK-converted (done by evaluateBuyOpportunity) -
+    // using the raw native-currency watchlist price here was the bug
+    // that caused the Ford position to be sized ~10x too large.
     let price = order.fillPrice || order.limitPrice;
 
     if (!price) {
-      const watchlistRow = db.prepare(
-        'SELECT current_price FROM watchlist WHERE ticker = ?'
-      ).get(ticker);
-      price = watchlistRow?.current_price || 0;
+      price = estimatedPriceNOK || 0;
 
       if (price > 0) {
-        console.log(`   ⏳ Order not yet filled - using evaluated price as estimate: ${price}`);
+        console.log(`   ⏳ Order not yet filled - using evaluated NOK price as estimate: ${price}`);
       }
     }
 
@@ -525,27 +589,38 @@ async function scanWatchlist(dryRun = false) {
     for (const stock of watchlist) {
       console.log(`\n🔍 Analyzing ${stock.ticker} (${stock.name})...`);
       
-      // IMPORTANT: Add delay to avoid rate limiting
-      if (watchlist.indexOf(stock) > 0) {
-        console.log('   ⏳ Waiting 5 seconds to avoid rate limit...');
-        await new Promise(resolve => setTimeout(resolve, 5000));
-      }
-      
-      // Get current price from Trading212
+      // Get current price from Finnhub - NOT Trading212. Trading212's API
+      // only returns a live price for stocks already in your portfolio;
+      // for a watchlist candidate you don't own yet, it has nothing.
+      // marketDataService throttles its own calls, so no manual sleep
+      // is needed here even as more stocks get added to the watchlist.
       try {
-        const currentPrice = await trading212.getCurrentPrice(stock.ticker);
+        // stock.exchange is only set for EU/non-US tickers (e.g. XETRA, LSE) -
+        // undefined/null here is correct and expected for US stocks
+        const currentPrice = await marketDataService.getQuote(stock.ticker, stock.exchange);
         if (currentPrice) {
-          // Update price in watchlist
-          const updateStmt = db.prepare(`
-            UPDATE watchlist 
-            SET current_price = ?, last_updated = CURRENT_TIMESTAMP 
-            WHERE ticker = ?
-          `);
-          updateStmt.run(currentPrice, stock.ticker);
           stock.current_price = currentPrice;
+        } else {
+          console.log(`   ⚠️ Could not fetch live price, using stored price (${stock.current_price})`);
         }
+
+        // Also refresh P/E, ROE, and debt/equity - NOT intrinsic_value.
+        // Intrinsic value is a judgment call (what YOU think it's worth),
+        // not a number any API computes - it stays whatever was set
+        // when the stock was added to the watchlist.
+        const fundamentals = await marketDataService.getFundamentals(stock.ticker, stock.exchange);
+        if (fundamentals.peRatio !== null) stock.pe_ratio = fundamentals.peRatio;
+        if (fundamentals.roe !== null) stock.roe = fundamentals.roe;
+        if (fundamentals.debtToEquity !== null) stock.debt_to_equity = fundamentals.debtToEquity;
+
+        const updateStmt = db.prepare(`
+          UPDATE watchlist 
+          SET current_price = ?, pe_ratio = ?, roe = ?, debt_to_equity = ?, last_updated = CURRENT_TIMESTAMP 
+          WHERE ticker = ?
+        `);
+        updateStmt.run(stock.current_price, stock.pe_ratio, stock.roe, stock.debt_to_equity, stock.ticker);
       } catch (err) {
-        console.log(`   ⚠️ Could not fetch current price, using stored price`);
+        console.log(`   ⚠️ Could not refresh live data, using stored values: ${err.message}`);
       }
       
       // Evaluate buy opportunity
@@ -560,7 +635,8 @@ async function scanWatchlist(dryRun = false) {
           stock.ticker,
           evaluation.shares,
           evaluation.reason,
-          dryRun
+          dryRun,
+          evaluation.priceNOK
         );
         
         results.trades.push(trade);
